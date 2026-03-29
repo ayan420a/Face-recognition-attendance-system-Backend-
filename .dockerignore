@@ -1,0 +1,7 @@
+.venv
+__pycache__
+.git
+*.pyc
+nixpacks.toml
+Procfile
+packages.txt
