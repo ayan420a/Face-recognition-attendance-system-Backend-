@@ -1,11 +1,3 @@
-from fastapi import FastAPI
-
-app = FastAPI()
-
-@app.get("/")
-def home():
-    return {"message": "Backend running"}
-    
 import os
 from datetime import datetime
 from typing import List
@@ -33,11 +25,16 @@ app = FastAPI()
 # CORS so React (localhost:3000) can call this API
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.get("/")
+def home():
+    return {"message": "Backend running"}
 
 # ------------ FACE DATA -------------
 known_encodings: List[np.ndarray] = []

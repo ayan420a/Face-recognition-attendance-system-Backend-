@@ -1,0 +1,13 @@
+[phases.setup]
+aptPkgs = [
+  "cmake",
+  "libx11-6",
+  "libsm6",
+  "libxext6",
+  "libxrender1",
+  "libgl1-mesa-glx",
+  "libglib2.0-0"
+]
+
+[start]
+cmd = "uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000}"
