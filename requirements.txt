@@ -1,0 +1,11 @@
+fastapi
+uvicorn[standard]
+python-multipart
+numpy
+pandas
+openpyxl
+opencv-python-headless
+dlib
+face_recognition
+scipy
+cmake
