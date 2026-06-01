@@ -89,6 +89,25 @@ def _get_safe_username(username: str) -> str:
     return re.sub(r'[^a-zA-Z0-9.-]', '_', username.lower())
 
 
+def _load_user_faces(username: str) -> list:
+    safe_user = _get_safe_username(username)
+    db_file = f"faces_{safe_user}.json"
+    if not os.path.exists(db_file):
+        return []
+    with open(db_file, "r") as f:
+        try:
+            return json.load(f)
+        except Exception:
+            return []
+
+
+def _save_user_faces(username: str, faces: list) -> None:
+    safe_user = _get_safe_username(username)
+    db_file = f"faces_{safe_user}.json"
+    with open(db_file, "w") as f:
+        json.dump(faces, f, indent=2)
+
+
 # ------------ AUTH MODELS ------------
 
 class SignupRequest(BaseModel):
@@ -162,13 +181,18 @@ def load_known_faces_for_user(username: str) -> tuple[List[np.ndarray], List[str
     user_dir = os.path.join(IMAGE_DIR, safe_user)
     os.makedirs(user_dir, exist_ok=True)
     
+    faces_db = _load_user_faces(username)
+    
     encodings = []
     names = []
     
-    for filename in os.listdir(user_dir):
-        if filename.lower().endswith((".jpg", ".jpeg", ".png")):
-            path = os.path.join(user_dir, filename)
-            name = os.path.splitext(filename)[0]
+    for face in faces_db:
+        filename = face.get("filename")
+        name = face.get("name")
+        if not filename or not name:
+            continue
+        path = os.path.join(user_dir, filename)
+        if os.path.exists(path):
             try:
                 img = face_recognition.load_image_file(path)
                 file_encodings = face_recognition.face_encodings(img)
@@ -311,9 +335,20 @@ async def register_face(
     user_dir = os.path.join(IMAGE_DIR, safe_user)
     os.makedirs(user_dir, exist_ok=True)
 
-    save_path = os.path.join(user_dir, f"{name}{ext}")
+    filename = f"{name}{ext}"
+    save_path = os.path.join(user_dir, filename)
     with open(save_path, "wb") as f:
         f.write(await photo.read())
+
+    # Add to individual user face database
+    faces = _load_user_faces(username)
+    faces = [f for f in faces if f["name"].lower() != name.lower()]
+    faces.append({
+        "name": name,
+        "filename": filename,
+        "registered_at": datetime.now().isoformat()
+    })
+    _save_user_faces(username, faces)
 
     return {"status": "ok", "message": f"Registered {name}"}
 
@@ -436,10 +471,10 @@ async def recognize_sequence(
 @app.get("/api/status")
 def status(username: str = Depends(_verify_token)):
     safe_user = _get_safe_username(username)
-    encodings, names = load_known_faces_for_user(username)
+    faces = _load_user_faces(username)
     excel_file = f"attendance_{safe_user}.xlsx"
     return {
-        "known_faces": len(names),
+        "known_faces": len(faces),
         "attendance_file": os.path.exists(excel_file),
     }
 
@@ -476,36 +511,35 @@ def clear_attendance(username: str = Depends(_verify_token)):
 
 @app.get("/api/faces/list")
 def list_registered_faces(username: str = Depends(_verify_token)):
-    """List all registered face image filenames for this user."""
-    safe_user = _get_safe_username(username)
-    user_dir = os.path.join(IMAGE_DIR, safe_user)
-    os.makedirs(user_dir, exist_ok=True)
-    faces = []
-    for filename in os.listdir(user_dir):
-        if filename.lower().endswith((".jpg", ".jpeg", ".png")):
-            name = os.path.splitext(filename)[0]
-            faces.append({"filename": filename, "name": name})
-    return faces
+    """List all registered faces in this user's database."""
+    return _load_user_faces(username)
 
 
 @app.delete("/api/faces/{face_name}")
 def delete_registered_face(face_name: str, username: str = Depends(_verify_token)):
-    """Delete a registered face by name."""
+    """Delete a registered face by name from the database and filesystem."""
     safe_user = _get_safe_username(username)
     user_dir = os.path.join(IMAGE_DIR, safe_user)
-    os.makedirs(user_dir, exist_ok=True)
-    deleted = False
-    for filename in os.listdir(user_dir):
-        if filename.lower().endswith((".jpg", ".jpeg", ".png")):
-            name = os.path.splitext(filename)[0]
-            if name.lower() == face_name.lower():
-                os.remove(os.path.join(user_dir, filename))
-                deleted = True
-                break
-
-    if not deleted:
+    
+    faces = _load_user_faces(username)
+    target_face = None
+    for f in faces:
+        if f["name"].lower() == face_name.lower():
+            target_face = f
+            break
+            
+    if not target_face:
         raise HTTPException(status_code=404, detail="Face not found")
-
+        
+    # Remove from filesystem
+    photo_path = os.path.join(user_dir, target_face["filename"])
+    if os.path.exists(photo_path):
+        os.remove(photo_path)
+        
+    # Remove from individual user face database
+    faces = [f for f in faces if f["name"].lower() != face_name.lower()]
+    _save_user_faces(username, faces)
+    
     return {"status": "ok", "message": f"Deleted {face_name}"}
 
 
