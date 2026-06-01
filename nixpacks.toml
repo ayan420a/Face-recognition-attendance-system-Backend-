@@ -1,6 +1,9 @@
 [phases.setup]
 aptPkgs = [
   "cmake",
+  "build-essential",
+  "libopenblas-dev",
+  "liblapack-dev",
   "libx11-6",
   "libsm6",
   "libxext6",
