@@ -82,6 +82,13 @@ def _verify_token(credentials: HTTPAuthorizationCredentials = Depends(security))
         raise HTTPException(status_code=401, detail="Invalid token")
 
 
+import re
+
+def _get_safe_username(username: str) -> str:
+    # Replace any character that is not alphanumeric, dot, or hyphen with underscore
+    return re.sub(r'[^a-zA-Z0-9.-]', '_', username.lower())
+
+
 # ------------ AUTH MODELS ------------
 
 class SignupRequest(BaseModel):
@@ -149,42 +156,31 @@ def get_me(username: str = Depends(_verify_token)):
 
 
 # ------------ FACE DATA -------------
-known_encodings: List[np.ndarray] = []
-known_names: List[str] = []
-_faces_loaded = False
 
-
-def load_known_faces(force: bool = False) -> None:
-    global known_encodings, known_names, _faces_loaded
-    if _faces_loaded and not force:
-        return
-
-    known_encodings = []
-    known_names = []
-
-    if not os.path.exists(IMAGE_DIR):
-        os.makedirs(IMAGE_DIR, exist_ok=True)
-        _faces_loaded = True
-        return
-
-    print("[INFO] Loading known faces...")
-    for filename in os.listdir(IMAGE_DIR):
+def load_known_faces_for_user(username: str) -> tuple[List[np.ndarray], List[str]]:
+    safe_user = _get_safe_username(username)
+    user_dir = os.path.join(IMAGE_DIR, safe_user)
+    os.makedirs(user_dir, exist_ok=True)
+    
+    encodings = []
+    names = []
+    
+    for filename in os.listdir(user_dir):
         if filename.lower().endswith((".jpg", ".jpeg", ".png")):
-            path = os.path.join(IMAGE_DIR, filename)
+            path = os.path.join(user_dir, filename)
             name = os.path.splitext(filename)[0]
             try:
                 img = face_recognition.load_image_file(path)
-                encodings = face_recognition.face_encodings(img)
-                if not encodings:
-                    print(f"[WARN] No face found in {filename}")
+                file_encodings = face_recognition.face_encodings(img)
+                if not file_encodings:
+                    print(f"[WARN] No face found in {filename} for user {username}")
                     continue
-                known_encodings.append(encodings[0])
-                known_names.append(name)
+                encodings.append(file_encodings[0])
+                names.append(name)
             except Exception as e:
-                print(f"[ERROR] Failed to load known face {filename}: {e}")
-
-    _faces_loaded = True
-    print(f"[INFO] Loaded {len(known_names)} known faces.")
+                print(f"[ERROR] Failed to load known face {filename} for user {username}: {e}")
+                
+    return encodings, names
 
 
 # ------------ LIVENESS --------------
@@ -229,26 +225,29 @@ EAR_CLOSED_THRESH = 0.23
 # ------------ ATTENDANCE ------------
 
 
-def mark_attendance(name: str) -> None:
+def mark_attendance(username: str, name: str) -> None:
     now = datetime.now()
     current_date = now.strftime("%Y-%m-%d")
     current_time = now.strftime("%H:%M:%S")
 
-    if not os.path.exists(EXCEL_FILE):
-        df = pd.DataFrame(columns=["name", "date", "time"])
-        df.to_excel(EXCEL_FILE, index=False)
+    safe_user = _get_safe_username(username)
+    excel_file = f"attendance_{safe_user}.xlsx"
 
-    df = pd.read_excel(EXCEL_FILE)
+    if not os.path.exists(excel_file):
+        df = pd.DataFrame(columns=["name", "date", "time"])
+        df.to_excel(excel_file, index=False)
+
+    df = pd.read_excel(excel_file)
 
     if not ((df["name"] == name) & (df["date"] == current_date)).any():
         new_row = pd.DataFrame(
             {"name": [name], "date": [current_date], "time": [current_time]}
         )
         df = pd.concat([df, new_row], ignore_index=True)
-        df.to_excel(EXCEL_FILE, index=False)
-        print(f"{name} marked present at {current_time}")
+        df.to_excel(excel_file, index=False)
+        print(f"[{username}] {name} marked present at {current_time}")
     else:
-        print(f"Attendance already marked for {name} today.")
+        print(f"[{username}] Attendance already marked for {name} today.")
 
 
 class AttendanceRow(BaseModel):
@@ -261,10 +260,12 @@ class AttendanceRow(BaseModel):
 
 
 @app.get("/api/attendance", response_model=list[AttendanceRow])
-def get_attendance():
-    if not os.path.exists(EXCEL_FILE):
+def get_attendance(username: str = Depends(_verify_token)):
+    safe_user = _get_safe_username(username)
+    excel_file = f"attendance_{safe_user}.xlsx"
+    if not os.path.exists(excel_file):
         return []
-    df = pd.read_excel(EXCEL_FILE)
+    df = pd.read_excel(excel_file)
     rows = [
         AttendanceRow(
             name=str(row["name"]),
@@ -279,42 +280,53 @@ def get_attendance():
 
 
 @app.get("/api/attendance/export")
-def export_attendance():
-    if not os.path.exists(EXCEL_FILE):
+def export_attendance(username: str = Depends(_verify_token)):
+    safe_user = _get_safe_username(username)
+    excel_file = f"attendance_{safe_user}.xlsx"
+    if not os.path.exists(excel_file):
         df = pd.DataFrame(columns=["name", "date", "time"])
-        df.to_excel(EXCEL_FILE, index=False)
+        df.to_excel(excel_file, index=False)
 
     return FileResponse(
-        path=EXCEL_FILE,
+        path=excel_file,
         media_type=(
             "application/"
             "vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         ),
-        filename="attendance.xlsx",
+        filename=f"attendance_{safe_user}.xlsx",
     )
 
 
 @app.post("/api/faces/register")
-async def register_face(name: str = Form(...), photo: UploadFile = File(...)):
+async def register_face(
+    name: str = Form(...),
+    photo: UploadFile = File(...),
+    username: str = Depends(_verify_token)
+):
     ext = os.path.splitext(photo.filename)[1].lower()
     if ext not in [".jpg", ".jpeg", ".png"]:
         return {"status": "error", "message": "Only JPG/PNG allowed"}
 
-    save_path = os.path.join(IMAGE_DIR, f"{name}{ext}")
+    safe_user = _get_safe_username(username)
+    user_dir = os.path.join(IMAGE_DIR, safe_user)
+    os.makedirs(user_dir, exist_ok=True)
+
+    save_path = os.path.join(user_dir, f"{name}{ext}")
     with open(save_path, "wb") as f:
         f.write(await photo.read())
 
-    load_known_faces(force=True)
     return {"status": "ok", "message": f"Registered {name}"}
 
 
 @app.post("/api/recognize")
-async def recognize_sequence(photos: List[UploadFile] = File(...)):
+async def recognize_sequence(
+    photos: List[UploadFile] = File(...),
+    username: str = Depends(_verify_token)
+):
     if not photos:
         return {"recognized": [], "liveness": []}
 
-    # Ensure known faces are loaded (lazy loading)
-    load_known_faces()
+    known_encodings, known_names = load_known_faces_for_user(username)
 
     all_face_encodings: list[list[np.ndarray]] = []
     frame_ears: list[float | None] = []
@@ -412,7 +424,7 @@ async def recognize_sequence(photos: List[UploadFile] = File(...)):
         )
 
     if name != "Unknown" and liveness_ok:
-        mark_attendance(name)
+        mark_attendance(username, name)
     elif name != "Unknown":
         print(f"[INFO] {name} recognized but liveness NOT confirmed")
 
@@ -422,11 +434,13 @@ async def recognize_sequence(photos: List[UploadFile] = File(...)):
 
 
 @app.get("/api/status")
-def status():
-    load_known_faces()
+def status(username: str = Depends(_verify_token)):
+    safe_user = _get_safe_username(username)
+    encodings, names = load_known_faces_for_user(username)
+    excel_file = f"attendance_{safe_user}.xlsx"
     return {
-        "known_faces": len(known_names),
-        "attendance_file": os.path.exists(EXCEL_FILE),
+        "known_faces": len(names),
+        "attendance_file": os.path.exists(excel_file),
     }
 
 
@@ -436,31 +450,38 @@ def status():
 @app.delete("/api/attendance/{index}")
 def delete_attendance_row(index: int, username: str = Depends(_verify_token)):
     """Delete a single attendance row by its index."""
-    if not os.path.exists(EXCEL_FILE):
+    safe_user = _get_safe_username(username)
+    excel_file = f"attendance_{safe_user}.xlsx"
+    if not os.path.exists(excel_file):
         raise HTTPException(status_code=404, detail="No attendance file")
 
-    df = pd.read_excel(EXCEL_FILE)
+    df = pd.read_excel(excel_file)
     if index < 0 or index >= len(df):
         raise HTTPException(status_code=400, detail="Index out of range")
 
     df = df.drop(index).reset_index(drop=True)
-    df.to_excel(EXCEL_FILE, index=False)
+    df.to_excel(excel_file, index=False)
     return {"status": "ok", "remaining": len(df)}
 
 
 @app.delete("/api/attendance")
 def clear_attendance(username: str = Depends(_verify_token)):
     """Clear all attendance records."""
+    safe_user = _get_safe_username(username)
+    excel_file = f"attendance_{safe_user}.xlsx"
     df = pd.DataFrame(columns=["name", "date", "time"])
-    df.to_excel(EXCEL_FILE, index=False)
+    df.to_excel(excel_file, index=False)
     return {"status": "ok", "message": "All attendance records cleared"}
 
 
 @app.get("/api/faces/list")
 def list_registered_faces(username: str = Depends(_verify_token)):
-    """List all registered face image filenames."""
+    """List all registered face image filenames for this user."""
+    safe_user = _get_safe_username(username)
+    user_dir = os.path.join(IMAGE_DIR, safe_user)
+    os.makedirs(user_dir, exist_ok=True)
     faces = []
-    for filename in os.listdir(IMAGE_DIR):
+    for filename in os.listdir(user_dir):
         if filename.lower().endswith((".jpg", ".jpeg", ".png")):
             name = os.path.splitext(filename)[0]
             faces.append({"filename": filename, "name": name})
@@ -470,19 +491,21 @@ def list_registered_faces(username: str = Depends(_verify_token)):
 @app.delete("/api/faces/{face_name}")
 def delete_registered_face(face_name: str, username: str = Depends(_verify_token)):
     """Delete a registered face by name."""
+    safe_user = _get_safe_username(username)
+    user_dir = os.path.join(IMAGE_DIR, safe_user)
+    os.makedirs(user_dir, exist_ok=True)
     deleted = False
-    for filename in os.listdir(IMAGE_DIR):
+    for filename in os.listdir(user_dir):
         if filename.lower().endswith((".jpg", ".jpeg", ".png")):
             name = os.path.splitext(filename)[0]
             if name.lower() == face_name.lower():
-                os.remove(os.path.join(IMAGE_DIR, filename))
+                os.remove(os.path.join(user_dir, filename))
                 deleted = True
                 break
 
     if not deleted:
         raise HTTPException(status_code=404, detail="Face not found")
 
-    load_known_faces(force=True)
     return {"status": "ok", "message": f"Deleted {face_name}"}
 
 
