@@ -8,3 +8,4 @@ opencv-python-headless
 dlib
 face_recognition
 scipy
+PyJWT
