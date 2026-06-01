@@ -484,3 +484,11 @@ def delete_registered_face(face_name: str, username: str = Depends(_verify_token
 
     load_known_faces(force=True)
     return {"status": "ok", "message": f"Deleted {face_name}"}
+
+
+# ------------ ENTRY POINT -----------
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.environ.get("PORT", 8000))
+    print(f"[INFO] Starting server on 0.0.0.0:{port}")
+    uvicorn.run(app, host="0.0.0.0", port=port)
